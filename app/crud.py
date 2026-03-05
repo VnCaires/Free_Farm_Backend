@@ -13,15 +13,20 @@ def create_player(db: Session, username: str, password: str) -> models.Player:
         username=username,
         hashed_password=hashed_password
     )
-    db.add(db_player)
-    db.commit()
-    db.refresh(db_player)
 
-    db_inventory = models.Inventory(player_id=db_player.id)
-    db.add(db_inventory)
-    db.commit()
+    try:
+        db.add(db_player)
+        db.flush()
 
-    return db_player
+        db_inventory = models.Inventory(player_id=db_player.id)
+        db.add(db_inventory)
+
+        db.commit()
+        db.refresh(db_player)
+        return db_player
+    except Exception:
+        db.rollback()
+        raise
 
 
 def deposit_balance(db: Session, player: models.Player, amount: float) -> models.Player:

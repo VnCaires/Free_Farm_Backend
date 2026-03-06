@@ -43,3 +43,7 @@ logs/
 # Sistema
 .DS_Store
 Thumbs.db
+
+PROJECT_GAME_SUMMARY.txt
+Development_Plan_Capital_Farm.pdf
+tmp_dev_plan_extracted.txt

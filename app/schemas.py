@@ -1,3 +1,5 @@
+from datetime import datetime
+
 from pydantic import BaseModel, Field
 
 
@@ -13,6 +15,16 @@ class PlayerLogin(BaseModel):
 
 class WalletDepositRequest(BaseModel):
     amount: float = Field(gt=0)
+
+
+class WalletTransactionResponse(BaseModel):
+    id: int
+    transaction_type: str
+    amount: float
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
 
 
 class InventoryResponse(BaseModel):

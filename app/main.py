@@ -1,6 +1,6 @@
 from collections.abc import Generator
 
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
 
@@ -64,6 +64,21 @@ def wallet_deposit(
         raise HTTPException(status_code=404, detail="Player not found")
 
     return crud.deposit_balance(db, db_player, deposit.amount)
+
+
+@app.get("/wallet/history", response_model=list[schemas.WalletTransactionResponse])
+def wallet_history(
+    username: str = Depends(auth.get_current_username),
+    db: Session = Depends(get_db),
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+):
+    db_player = crud.get_player_by_username(db, username)
+
+    if db_player is None:
+        raise HTTPException(status_code=404, detail="Player not found")
+
+    return crud.get_wallet_history_by_player_id(db, db_player.id, limit=limit, offset=offset)
 
 
 @app.get("/inventory/me", response_model=schemas.InventoryResponse)

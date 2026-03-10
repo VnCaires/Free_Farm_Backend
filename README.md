@@ -48,6 +48,13 @@ Documentação: `http://localhost:8000/docs`
 - `POST /token/refresh` - Renovar sessao usando refresh token
 - `POST /logout` - Invalidar sessao atual (access token + refresh token)
 - `GET /me` - Obter dados do jogador autenticado
+- `POST /wallet/deposit` - Depositar saldo na carteira do jogador autenticado
+- `GET /wallet/history` - Consultar historico da carteira do jogador autenticado
+- `GET /inventory/me` - Obter inventario estruturado do jogador autenticado
+- `POST /inventory/items/add` - Adicionar item ao inventario do jogador autenticado
+- `GET /land/me` - Obter grid de terreno do jogador autenticado
+- `POST /land/plots` - Criar lote de terreno com coordenadas unicas por jogador
+- `PATCH /land/plots/{plot_id}/state` - Atualizar estado do lote (empty, plowed, planted)
 
 ## Session Policy
 

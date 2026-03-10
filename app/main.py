@@ -179,3 +179,61 @@ def add_inventory_item(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     return crud.get_inventory_structured(db, db_inventory)
+
+
+@app.get("/land/me", response_model=schemas.LandGridResponse)
+def get_my_land(username: str = Depends(auth.get_current_username), db: Session = Depends(get_db)):
+    db_player = crud.get_player_by_username(db, username)
+    if db_player is None:
+        raise HTTPException(status_code=404, detail="Player not found")
+
+    land_plots = crud.get_or_create_land_plots(db, db_player.id)
+    return {
+        "player_id": db_player.id,
+        "total_plots": len(land_plots),
+        "plots": land_plots,
+    }
+
+
+@app.post("/land/plots", response_model=schemas.LandPlotResponse)
+def create_land_plot(
+    payload: schemas.LandPlotCreateRequest,
+    username: str = Depends(auth.get_current_username),
+    db: Session = Depends(get_db),
+):
+    db_player = crud.get_player_by_username(db, username)
+    if db_player is None:
+        raise HTTPException(status_code=404, detail="Player not found")
+
+    try:
+        return crud.create_land_plot(
+            db=db,
+            player_id=db_player.id,
+            x=payload.x,
+            y=payload.y,
+            soil_type=payload.soil_type,
+            state=payload.state,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.patch("/land/plots/{plot_id}/state", response_model=schemas.LandPlotResponse)
+def update_land_plot_state(
+    plot_id: int,
+    payload: schemas.LandPlotStateUpdateRequest,
+    username: str = Depends(auth.get_current_username),
+    db: Session = Depends(get_db),
+):
+    db_player = crud.get_player_by_username(db, username)
+    if db_player is None:
+        raise HTTPException(status_code=404, detail="Player not found")
+
+    db_plot = crud.get_land_plot_by_id_for_player(db, db_player.id, plot_id)
+    if db_plot is None:
+        raise HTTPException(status_code=404, detail="Land plot not found")
+
+    try:
+        return crud.update_land_plot_state(db, db_plot, payload.state)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc

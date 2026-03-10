@@ -74,6 +74,38 @@ class InventoryResponse(BaseModel):
     categories: list[InventoryCategoryResponse]
 
 
+class LandPlotCreateRequest(BaseModel):
+    x: int = Field(ge=0)
+    y: int = Field(ge=0)
+    soil_type: str = "loam"
+    state: str = "empty"
+
+
+class LandPlotStateUpdateRequest(BaseModel):
+    state: str
+
+
+class LandPlotResponse(BaseModel):
+    id: int
+    player_id: int
+    x: int
+    y: int
+    soil_type: str
+    state: str
+    is_occupied: bool
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class LandGridResponse(BaseModel):
+    player_id: int
+    total_plots: int
+    plots: list[LandPlotResponse]
+
+
 class PlayerResponse(BaseModel):
     id: int
     username: str

@@ -8,13 +8,28 @@ from . import auth, models
 
 
 ALLOWED_TRANSACTION_TYPES = {"deposit", "expense"}
+ALLOWED_LAND_STATES = {"empty", "plowed", "planted"}
 INVENTORY_CAPACITY_LIMIT = 100
+DEFAULT_LAND_WIDTH = 3
+DEFAULT_LAND_HEIGHT = 3
+DEFAULT_SOIL_TYPE = "loam"
 DEFAULT_ITEM_CATALOG: list[tuple[str, str, str]] = [
     ("seed_basic", "Basic Seed", "seed"),
     ("water_basic", "Water", "resource"),
     ("fertilizer_basic", "Fertilizer", "resource"),
 ]
 EMAIL_VERIFICATION_ENABLED = os.getenv("EMAIL_VERIFICATION_ENABLED", "false").lower() == "true"
+
+
+def _is_plot_occupied(state: str) -> bool:
+    return state == "planted"
+
+
+def _validate_land_state(state: str) -> str:
+    normalized = state.strip().lower()
+    if normalized not in ALLOWED_LAND_STATES:
+        raise ValueError("Invalid land state")
+    return normalized
 
 
 def get_player_by_username(db: Session, username: str) -> models.Player | None:
@@ -72,6 +87,7 @@ def create_player(db: Session, username: str, email: str, password: str) -> mode
         )
         db.add(db_inventory)
         db.add(db_profile)
+        bootstrap_default_land_plots(db, db_player.id)
 
         ensure_default_item_catalog(db)
         bootstrap_inventory_items_from_legacy(db, db_inventory)
@@ -141,9 +157,9 @@ def bootstrap_inventory_items_from_legacy(db: Session, inventory: models.Invento
         return False
 
     legacy_items = [
-        ("seed_basic", max(0, inventory.seeds)),
-        ("water_basic", max(0, inventory.water)),
-        ("fertilizer_basic", max(0, inventory.fertilizer)),
+        ("seed_basic", max(0, int(inventory.seeds or 0))),
+        ("water_basic", max(0, int(inventory.water or 0))),
+        ("fertilizer_basic", max(0, int(inventory.fertilizer or 0))),
     ]
 
     changed = False
@@ -272,3 +288,110 @@ def get_inventory_structured(db: Session, inventory: models.Inventory) -> dict:
         "total_quantity": total_quantity,
         "categories": categories,
     }
+
+
+def get_land_plot_by_coordinates(db: Session, player_id: int, x: int, y: int) -> models.LandPlot | None:
+    return (
+        db.query(models.LandPlot)
+        .filter(models.LandPlot.player_id == player_id, models.LandPlot.x == x, models.LandPlot.y == y)
+        .first()
+    )
+
+
+def get_land_plot_by_id_for_player(db: Session, player_id: int, plot_id: int) -> models.LandPlot | None:
+    return (
+        db.query(models.LandPlot)
+        .filter(models.LandPlot.player_id == player_id, models.LandPlot.id == plot_id)
+        .first()
+    )
+
+
+def list_land_plots_by_player_id(db: Session, player_id: int) -> list[models.LandPlot]:
+    return (
+        db.query(models.LandPlot)
+        .filter(models.LandPlot.player_id == player_id)
+        .order_by(models.LandPlot.y.asc(), models.LandPlot.x.asc())
+        .all()
+    )
+
+
+def bootstrap_default_land_plots(
+    db: Session,
+    player_id: int,
+    width: int = DEFAULT_LAND_WIDTH,
+    height: int = DEFAULT_LAND_HEIGHT,
+) -> bool:
+    has_plots = (
+        db.query(models.LandPlot)
+        .filter(models.LandPlot.player_id == player_id)
+        .first()
+        is not None
+    )
+    if has_plots:
+        return False
+
+    for y in range(height):
+        for x in range(width):
+            db.add(
+                models.LandPlot(
+                    player_id=player_id,
+                    x=x,
+                    y=y,
+                    soil_type=DEFAULT_SOIL_TYPE,
+                    state="empty",
+                    is_occupied=False,
+                )
+            )
+    return True
+
+
+def get_or_create_land_plots(db: Session, player_id: int) -> list[models.LandPlot]:
+    created_default = bootstrap_default_land_plots(db, player_id)
+    if created_default:
+        db.commit()
+
+    return list_land_plots_by_player_id(db, player_id)
+
+
+def create_land_plot(
+    db: Session,
+    player_id: int,
+    x: int,
+    y: int,
+    soil_type: str = DEFAULT_SOIL_TYPE,
+    state: str = "empty",
+) -> models.LandPlot:
+    validated_state = _validate_land_state(state)
+    normalized_soil_type = soil_type.strip().lower()
+    if not normalized_soil_type:
+        raise ValueError("Invalid soil type")
+
+    db_plot = get_land_plot_by_coordinates(db, player_id, x, y)
+    if db_plot is not None:
+        raise ValueError("Plot coordinates already in use")
+
+    db_plot = models.LandPlot(
+        player_id=player_id,
+        x=x,
+        y=y,
+        soil_type=normalized_soil_type,
+        state=validated_state,
+        is_occupied=_is_plot_occupied(validated_state),
+    )
+    db.add(db_plot)
+    db.commit()
+    db.refresh(db_plot)
+    return db_plot
+
+
+def update_land_plot_state(db: Session, land_plot: models.LandPlot, new_state: str) -> models.LandPlot:
+    validated_state = _validate_land_state(new_state)
+
+    if validated_state == "planted" and land_plot.is_occupied:
+        raise ValueError("Plot is already occupied")
+
+    land_plot.state = validated_state
+    land_plot.is_occupied = _is_plot_occupied(validated_state)
+    db.commit()
+    db.refresh(land_plot)
+    return land_plot

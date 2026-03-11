@@ -1,7 +1,7 @@
 PROJECT OVERVIEW - CAPITAL FARM BACKEND
 
 Purpose
-- Backend API for a farming game where players create accounts, manage identity and sessions, organize inventory, manage land, plant crops, harvest resources, and progress through an expanding production chain.
+- Backend API for a farming game where players create accounts, manage identity and sessions, organize inventory, manage land, plant crops, grow them over time, harvest resources, and progress through an expanding production chain.
 
 Current Tech Stack
 - Python + FastAPI
@@ -18,9 +18,11 @@ What Is Already Implemented
 - Wallet deposit endpoint and wallet history endpoint
 - Structured inventory with item catalog, quantities, categories, and capacity limit
 - Land grid bootstrap and land state management
-- Crop type catalog
-- Planting endpoint with seed consumption and plot occupancy validation
-- Player crop listing endpoint
+- Crop type catalog for the current stage (`wheat`, `corn`, `soy`)
+- Planting endpoint with crop-specific seed consumption and plot occupancy validation
+- Time-based crop growth state machine (`planted`, `growing`, `ready`)
+- Crop readiness endpoint and player crop listing
+- Harvest endpoint with inventory reward integration and plot release
 
 Core Domain So Far
 - Player
@@ -40,7 +42,7 @@ Core Domain So Far
 - LandPlot
   - player_id, x, y, soil_type, state, is_occupied
 - CropType
-  - code, name, growth_time_seconds, yield_quantity, base_value, seed_item_code
+  - code, name, growth_time_seconds, yield_quantity, base_value, seed_item_code, product_item_code
 - PlayerCrop
   - player_id, crop_type_id, land_plot_id, planted_at, state
 
@@ -86,12 +88,22 @@ API Behavior (current)
 - /wallet/history returns player-scoped financial ledger
 - /inventory/me returns structured inventory grouped by category
 - /land/me returns the player land grid
-- /crops/types returns available crop catalog
-- /crops/plant validates land + seed and persists planting
-- /crops/me returns player-owned crop records
+- /crops/types returns available crop catalog for this game stage
+- /crops/plant validates land + crop-specific seed and persists planting
+- /crops/me returns player-owned crop records with growth metrics
+- /crops/{crop_id}/state returns the synchronized crop lifecycle state
+- /crops/{crop_id}/harvest validates readiness, rewards output, and frees the plot
+
+Crop Lifecycle Behavior (current)
+- Planting stores the crop on a specific `land_plot_id`
+- Growth is deterministic and derived from `planted_at` + `growth_time_seconds`
+- States transition logically across `planted`, `growing`, and `ready`
+- Harvest changes the crop to `harvested`
+- Harvested crops cannot be harvested again
+- Harvest releases the associated land plot back to `empty`
 
 Project Direction (from planning)
-- C2: progression, growth state machine, harvest flow, warehouse, planting expansion
+- C2: progression, warehouse, planting expansion, replanting, multi-harvest
 - C4: animals (production, feeding, reproduction)
 - Mid-term economy loop: crop processing, workers, machines, fuel, fertilizer feedback loop
 - Later stages: market dynamics, multiplayer/social, analytics, Unity integration
@@ -100,7 +112,7 @@ Operational Notes for Codex
 - Use venv at ./venv
 - Start server with: python -m uvicorn app.main:app --reload
 - Keep SECRET_KEY configured by environment when possible
-- Prefer transaction-safe writes for player economy, inventory, land, and crop operations
+- Prefer transaction-safe writes for player economy, inventory, land, crop, and harvest operations
 
 Repository Conventions
 - Keep this file as AI context bootstrap only

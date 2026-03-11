@@ -271,11 +271,11 @@ def harvest_my_crop(
         raise HTTPException(status_code=404, detail="Player not found")
 
     try:
-        db_player_crop, inventory = crud.harvest_crop(db, db_player, crop_id)
+        harvested_crop, inventory = crud.harvest_crop(db, db_player, crop_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    return {"crop": crud.build_player_crop_response(db_player_crop), "inventory": inventory}
+    return {"crop": harvested_crop, "inventory": inventory}
 
 
 @app.get("/land/me", response_model=schemas.LandGridResponse)
@@ -288,7 +288,7 @@ def get_my_land(username: str = Depends(auth.get_current_username), db: Session 
     return {
         "player_id": db_player.id,
         "total_plots": len(land_plots),
-        "plots": land_plots,
+        "plots": [crud.build_land_plot_response(db, land_plot) for land_plot in land_plots],
     }
 
 

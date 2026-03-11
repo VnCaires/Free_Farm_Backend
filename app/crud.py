@@ -614,6 +614,42 @@ def build_player_crop_response(player_crop: models.PlayerCrop) -> dict:
     }
 
 
+def build_land_plot_crop_response(player_crop: models.PlayerCrop) -> dict:
+    crop_response = build_player_crop_response(player_crop)
+    return {
+        "id": crop_response["id"],
+        "crop_type_code": crop_response["crop_type_code"],
+        "crop_type_name": crop_response["crop_type_name"],
+        "product_item_code": crop_response["product_item_code"],
+        "planted_at": crop_response["planted_at"],
+        "state": crop_response["state"],
+        "growth_time_seconds": crop_response["growth_time_seconds"],
+        "elapsed_growth_seconds": crop_response["elapsed_growth_seconds"],
+        "seconds_until_ready": crop_response["seconds_until_ready"],
+        "is_ready": crop_response["is_ready"],
+    }
+
+
+def build_land_plot_response(db: Session, land_plot: models.LandPlot) -> dict:
+    crop_payload = None
+    if land_plot.is_occupied and land_plot.crop is not None and land_plot.crop.state != "harvested":
+        synced_crop = sync_player_crop_state(db, land_plot.crop)
+        crop_payload = build_land_plot_crop_response(synced_crop)
+
+    return {
+        "id": land_plot.id,
+        "player_id": land_plot.player_id,
+        "x": land_plot.x,
+        "y": land_plot.y,
+        "soil_type": land_plot.soil_type,
+        "state": land_plot.state,
+        "is_occupied": land_plot.is_occupied,
+        "created_at": land_plot.created_at,
+        "updated_at": land_plot.updated_at,
+        "crop": crop_payload,
+    }
+
+
 def plant_crop(
     db: Session,
     player: models.Player,
@@ -651,7 +687,7 @@ def plant_crop(
     return db_player_crop
 
 
-def harvest_crop(db: Session, player: models.Player, crop_id: int) -> tuple[models.PlayerCrop, dict]:
+def harvest_crop(db: Session, player: models.Player, crop_id: int) -> tuple[dict, dict]:
     db_player_crop = get_player_crop_by_id_for_player(db, player.id, crop_id)
     if db_player_crop is None:
         raise ValueError("Crop not found")
@@ -670,19 +706,20 @@ def harvest_crop(db: Session, player: models.Player, crop_id: int) -> tuple[mode
 
     db_plot = db_player_crop.land_plot
     db_player_crop.state = "harvested"
+    harvested_crop_response = build_player_crop_response(db_player_crop)
     db_plot.state = "empty"
     db_plot.is_occupied = False
+    db.delete(db_player_crop)
 
     db_stats = get_stats_by_player_id(db, player.id)
     if db_stats is not None:
         db_stats.crops_harvested += 1
 
     db.commit()
-    db.refresh(db_player_crop)
     db.refresh(db_plot)
     db.refresh(db_inventory)
 
-    return db_player_crop, get_inventory_structured(db, db_inventory)
+    return harvested_crop_response, get_inventory_structured(db, db_inventory)
 
 
 def get_inventory_structured(db: Session, inventory: models.Inventory) -> dict:

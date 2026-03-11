@@ -161,6 +161,19 @@ class PlayerCropResponse(BaseModel):
     is_ready: bool
 
 
+class LandPlotCropResponse(BaseModel):
+    id: int
+    crop_type_code: str
+    crop_type_name: str
+    product_item_code: str
+    planted_at: datetime
+    state: str
+    growth_time_seconds: int
+    elapsed_growth_seconds: int
+    seconds_until_ready: int
+    is_ready: bool
+
+
 class HarvestCropResponse(BaseModel):
     crop: PlayerCropResponse
     inventory: InventoryResponse
@@ -187,6 +200,7 @@ class LandPlotResponse(BaseModel):
     is_occupied: bool
     created_at: datetime
     updated_at: datetime
+    crop: LandPlotCropResponse | None = None
 
     class Config:
         from_attributes = True

@@ -29,3 +29,14 @@ def run_startup_migrations() -> None:
                     text("ALTER TABLE players ADD COLUMN email_verified BOOLEAN NOT NULL DEFAULT 1")
                 )
             connection.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ix_players_email ON players (email)"))
+
+        if "player_profiles" in table_names:
+            profile_columns = {col["name"] for col in inspector.get_columns("player_profiles")}
+            if "avatar_url" not in profile_columns:
+                connection.execute(text("ALTER TABLE player_profiles ADD COLUMN avatar_url VARCHAR NOT NULL DEFAULT ''"))
+
+        if "crop_types" in table_names:
+            crop_type_columns = {col["name"] for col in inspector.get_columns("crop_types")}
+            if "seed_item_code" not in crop_type_columns:
+                connection.execute(text("ALTER TABLE crop_types ADD COLUMN seed_item_code VARCHAR NOT NULL DEFAULT 'seed_basic'"))
+

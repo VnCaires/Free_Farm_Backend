@@ -17,9 +17,11 @@ class Player(Base):
     balance: Mapped[float] = mapped_column(Float, default=100.0)
     inventory: Mapped["Inventory"] = relationship(back_populates="player", uselist=False)
     profile: Mapped["PlayerProfile"] = relationship(back_populates="player", uselist=False)
+    stats: Mapped["PlayerStats"] = relationship(back_populates="player", uselist=False)
     wallet_transactions: Mapped[list["WalletTransaction"]] = relationship(back_populates="player")
     refresh_sessions: Mapped[list["RefreshSession"]] = relationship(back_populates="player")
     land_plots: Mapped[list["LandPlot"]] = relationship(back_populates="player", cascade="all, delete-orphan")
+    crops: Mapped[list["PlayerCrop"]] = relationship(back_populates="player", cascade="all, delete-orphan")
 
 
 class Inventory(Base):
@@ -80,6 +82,49 @@ class PlayerProfile(Base):
     player: Mapped[Player] = relationship(back_populates="profile")
 
 
+class PlayerStats(Base):
+    __tablename__ = "player_stats"
+
+    id: Mapped[int] = mapped_column(primary_key=True, index=True)
+    player_id: Mapped[int] = mapped_column(ForeignKey("players.id"), unique=True, index=True)
+    games_played: Mapped[int] = mapped_column(Integer, default=0)
+    crops_planted: Mapped[int] = mapped_column(Integer, default=0)
+    crops_harvested: Mapped[int] = mapped_column(Integer, default=0)
+    total_earnings: Mapped[float] = mapped_column(Float, default=0.0)
+    total_expenses: Mapped[float] = mapped_column(Float, default=0.0)
+
+    player: Mapped[Player] = relationship(back_populates="stats")
+
+
+class CropType(Base):
+    __tablename__ = "crop_types"
+
+    id: Mapped[int] = mapped_column(primary_key=True, index=True)
+    code: Mapped[str] = mapped_column(String, unique=True, index=True)
+    name: Mapped[str] = mapped_column(String, unique=True, index=True)
+    growth_time_seconds: Mapped[int] = mapped_column(Integer)
+    yield_quantity: Mapped[int] = mapped_column(Integer, default=1)
+    base_value: Mapped[float] = mapped_column(Float, default=0.0)
+    seed_item_code: Mapped[str] = mapped_column(String, default="seed_basic")
+
+    crops: Mapped[list["PlayerCrop"]] = relationship(back_populates="crop_type")
+
+
+class PlayerCrop(Base):
+    __tablename__ = "player_crops"
+
+    id: Mapped[int] = mapped_column(primary_key=True, index=True)
+    player_id: Mapped[int] = mapped_column(ForeignKey("players.id"), index=True)
+    crop_type_id: Mapped[int] = mapped_column(ForeignKey("crop_types.id"), index=True)
+    land_plot_id: Mapped[int] = mapped_column(ForeignKey("land_plots.id"), unique=True, index=True)
+    planted_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+    state: Mapped[str] = mapped_column(String, default="planted", index=True)
+
+    player: Mapped[Player] = relationship(back_populates="crops")
+    crop_type: Mapped[CropType] = relationship(back_populates="crops")
+    land_plot: Mapped["LandPlot"] = relationship(back_populates="crop", uselist=False)
+
+
 class RefreshSession(Base):
     __tablename__ = "refresh_sessions"
 
@@ -124,3 +169,4 @@ class LandPlot(Base):
     )
 
     player: Mapped[Player] = relationship(back_populates="land_plots")
+    crop: Mapped["PlayerCrop | None"] = relationship(back_populates="land_plot", uselist=False)

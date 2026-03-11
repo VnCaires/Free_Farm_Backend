@@ -122,6 +122,36 @@ def get_me(username: str = Depends(auth.get_current_username), db: Session = Dep
     return db_player
 
 
+@app.get("/profile/me", response_model=schemas.PlayerProfileResponse)
+def get_my_profile(username: str = Depends(auth.get_current_username), db: Session = Depends(get_db)):
+    db_player = crud.get_player_by_username(db, username)
+    if db_player is None:
+        raise HTTPException(status_code=404, detail="Player not found")
+
+    db_profile, db_stats = crud.get_or_create_player_profile(db, db_player)
+    return crud.build_player_profile_response(db_player, db_profile, db_stats)
+
+
+@app.patch("/profile/me", response_model=schemas.PlayerProfileResponse)
+def update_my_profile(
+    payload: schemas.PlayerProfileUpdateRequest,
+    username: str = Depends(auth.get_current_username),
+    db: Session = Depends(get_db),
+):
+    db_player = crud.get_player_by_username(db, username)
+    if db_player is None:
+        raise HTTPException(status_code=404, detail="Player not found")
+
+    db_profile, db_stats = crud.get_or_create_player_profile(db, db_player)
+    crud.update_player_profile(
+        db,
+        db_profile,
+        display_name=payload.display_name,
+        avatar_url=payload.avatar_url,
+    )
+    return crud.build_player_profile_response(db_player, db_profile, db_stats)
+
+
 @app.post("/wallet/deposit", response_model=schemas.PlayerResponse)
 def wallet_deposit(
     deposit: schemas.WalletDepositRequest,
@@ -179,6 +209,38 @@ def add_inventory_item(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     return crud.get_inventory_structured(db, db_inventory)
+
+
+@app.get("/crops/types", response_model=list[schemas.CropTypeResponse])
+def get_crop_types(db: Session = Depends(get_db)):
+    return crud.list_crop_types(db)
+
+
+@app.post("/crops/plant", response_model=schemas.PlayerCropResponse)
+def plant_crop(
+    payload: schemas.PlantCropRequest,
+    username: str = Depends(auth.get_current_username),
+    db: Session = Depends(get_db),
+):
+    db_player = crud.get_player_by_username(db, username)
+    if db_player is None:
+        raise HTTPException(status_code=404, detail="Player not found")
+
+    try:
+        db_player_crop = crud.plant_crop(db, db_player, payload.crop_type_code, payload.plot_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return crud.build_player_crop_response(db_player_crop)
+
+
+@app.get("/crops/me", response_model=list[schemas.PlayerCropResponse])
+def get_my_crops(username: str = Depends(auth.get_current_username), db: Session = Depends(get_db)):
+    db_player = crud.get_player_by_username(db, username)
+    if db_player is None:
+        raise HTTPException(status_code=404, detail="Player not found")
+
+    return [crud.build_player_crop_response(player_crop) for player_crop in crud.list_player_crops(db, db_player.id)]
 
 
 @app.get("/land/me", response_model=schemas.LandGridResponse)

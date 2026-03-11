@@ -9,6 +9,7 @@ from . import auth, models
 
 ALLOWED_TRANSACTION_TYPES = {"deposit", "expense"}
 ALLOWED_LAND_STATES = {"empty", "plowed", "planted"}
+ALLOWED_CROP_STATES = {"planted", "growing", "ready"}
 INVENTORY_CAPACITY_LIMIT = 100
 DEFAULT_LAND_WIDTH = 3
 DEFAULT_LAND_HEIGHT = 3
@@ -17,6 +18,11 @@ DEFAULT_ITEM_CATALOG: list[tuple[str, str, str]] = [
     ("seed_basic", "Basic Seed", "seed"),
     ("water_basic", "Water", "resource"),
     ("fertilizer_basic", "Fertilizer", "resource"),
+]
+DEFAULT_CROP_TYPES: list[tuple[str, str, int, int, float, str]] = [
+    ("carrot", "Carrot", 300, 2, 5.0, "seed_basic"),
+    ("corn", "Corn", 600, 3, 8.0, "seed_basic"),
+    ("wheat", "Wheat", 480, 2, 6.0, "seed_basic"),
 ]
 EMAIL_VERIFICATION_ENABLED = os.getenv("EMAIL_VERIFICATION_ENABLED", "false").lower() == "true"
 
@@ -65,6 +71,33 @@ def ensure_default_item_catalog(db: Session) -> bool:
     return changed
 
 
+
+
+def get_crop_type_by_code(db: Session, code: str) -> models.CropType | None:
+    return db.query(models.CropType).filter(models.CropType.code == code).first()
+
+
+def ensure_default_crop_types(db: Session) -> bool:
+    changed = False
+    for code, name, growth_time_seconds, yield_quantity, base_value, seed_item_code in DEFAULT_CROP_TYPES:
+        db_crop_type = get_crop_type_by_code(db, code)
+        if db_crop_type is None:
+            db.add(
+                models.CropType(
+                    code=code,
+                    name=name,
+                    growth_time_seconds=growth_time_seconds,
+                    yield_quantity=yield_quantity,
+                    base_value=base_value,
+                    seed_item_code=seed_item_code,
+                )
+            )
+            changed = True
+    if changed:
+        db.flush()
+    return changed
+
+
 def create_player(db: Session, username: str, email: str, password: str) -> models.Player:
     normalized_email = email.strip().lower()
     hashed_password = auth.hash_password(password)
@@ -85,11 +118,14 @@ def create_player(db: Session, username: str, email: str, password: str) -> mode
             display_name=username,
             avatar_url="",
         )
+        db_stats = models.PlayerStats(player_id=db_player.id)
         db.add(db_inventory)
         db.add(db_profile)
+        db.add(db_stats)
         bootstrap_default_land_plots(db, db_player.id)
 
         ensure_default_item_catalog(db)
+        ensure_default_crop_types(db)
         bootstrap_inventory_items_from_legacy(db, db_inventory)
 
         db.commit()
@@ -99,6 +135,79 @@ def create_player(db: Session, username: str, email: str, password: str) -> mode
         db.rollback()
         raise
 
+
+
+def get_profile_by_player_id(db: Session, player_id: int) -> models.PlayerProfile | None:
+    return db.query(models.PlayerProfile).filter(models.PlayerProfile.player_id == player_id).first()
+
+
+def get_stats_by_player_id(db: Session, player_id: int) -> models.PlayerStats | None:
+    return db.query(models.PlayerStats).filter(models.PlayerStats.player_id == player_id).first()
+
+
+def get_or_create_player_profile(db: Session, player: models.Player) -> tuple[models.PlayerProfile, models.PlayerStats]:
+    db_profile = get_profile_by_player_id(db, player.id)
+    db_stats = get_stats_by_player_id(db, player.id)
+    changed = False
+
+    if db_profile is None:
+        db_profile = models.PlayerProfile(
+            player_id=player.id,
+            display_name=player.username,
+            avatar_url="",
+        )
+        db.add(db_profile)
+        changed = True
+
+    if db_stats is None:
+        db_stats = models.PlayerStats(player_id=player.id)
+        db.add(db_stats)
+        changed = True
+
+    if changed:
+        db.commit()
+        db.refresh(db_profile)
+        db.refresh(db_stats)
+
+    return db_profile, db_stats
+
+
+def build_player_profile_response(
+    player: models.Player,
+    profile: models.PlayerProfile,
+    stats: models.PlayerStats,
+) -> dict:
+    return {
+        "player_id": player.id,
+        "username": player.username,
+        "email": player.email,
+        "display_name": profile.display_name,
+        "avatar_url": profile.avatar_url,
+        "created_at": profile.created_at,
+        "stats": {
+            "games_played": stats.games_played,
+            "crops_planted": stats.crops_planted,
+            "crops_harvested": stats.crops_harvested,
+            "total_earnings": stats.total_earnings,
+            "total_expenses": stats.total_expenses,
+        },
+    }
+
+
+def update_player_profile(
+    db: Session,
+    profile: models.PlayerProfile,
+    display_name: str | None = None,
+    avatar_url: str | None = None,
+) -> models.PlayerProfile:
+    if display_name is not None:
+        profile.display_name = display_name
+    if avatar_url is not None:
+        profile.avatar_url = avatar_url
+
+    db.commit()
+    db.refresh(profile)
+    return profile
 
 def create_wallet_transaction(
     db: Session,
@@ -194,9 +303,10 @@ def get_or_create_inventory(db: Session, player_id: int) -> models.Inventory:
         created_inventory = True
 
     catalog_changed = ensure_default_item_catalog(db)
+    crop_types_changed = ensure_default_crop_types(db)
     bootstrap_changed = bootstrap_inventory_items_from_legacy(db, db_inventory)
 
-    if created_inventory or catalog_changed or bootstrap_changed:
+    if created_inventory or catalog_changed or crop_types_changed or bootstrap_changed:
         db.commit()
         db.refresh(db_inventory)
 
@@ -251,6 +361,96 @@ def add_item_to_inventory(
 
     db.commit()
     
+
+
+
+
+def remove_item_from_inventory(
+    db: Session,
+    inventory: models.Inventory,
+    item_code: str,
+    quantity: int,
+) -> None:
+    if quantity <= 0:
+        raise ValueError("Quantity must be greater than zero")
+
+    db_item = get_item_catalog_by_code(db, item_code)
+    if db_item is None:
+        raise ValueError("Item code not found")
+
+    db_inventory_item = (
+        db.query(models.InventoryItem)
+        .filter(
+            models.InventoryItem.inventory_id == inventory.id,
+            models.InventoryItem.item_id == db_item.id,
+        )
+        .first()
+    )
+    if db_inventory_item is None or db_inventory_item.quantity < quantity:
+        raise ValueError("Not enough items in inventory")
+
+    db_inventory_item.quantity -= quantity
+    if db_inventory_item.quantity == 0:
+        db.delete(db_inventory_item)
+
+
+def list_crop_types(db: Session) -> list[models.CropType]:
+    ensure_default_crop_types(db)
+    return db.query(models.CropType).order_by(models.CropType.name.asc()).all()
+
+
+def list_player_crops(db: Session, player_id: int) -> list[models.PlayerCrop]:
+    return (
+        db.query(models.PlayerCrop)
+        .filter(models.PlayerCrop.player_id == player_id)
+        .order_by(models.PlayerCrop.planted_at.desc())
+        .all()
+    )
+
+
+def build_player_crop_response(player_crop: models.PlayerCrop) -> dict:
+    return {
+        "id": player_crop.id,
+        "player_id": player_crop.player_id,
+        "crop_type_code": player_crop.crop_type.code,
+        "crop_type_name": player_crop.crop_type.name,
+        "land_plot_id": player_crop.land_plot_id,
+        "planted_at": player_crop.planted_at,
+        "state": player_crop.state,
+    }
+
+
+def plant_crop(
+    db: Session,
+    player: models.Player,
+    crop_type_code: str,
+    plot_id: int,
+) -> models.PlayerCrop:
+    db_inventory = get_or_create_inventory(db, player.id)
+    db_plot = get_land_plot_by_id_for_player(db, player.id, plot_id)
+    if db_plot is None:
+        raise ValueError("Land plot not found")
+    if db_plot.is_occupied or db_plot.state not in {"empty", "plowed"}:
+        raise ValueError("Land plot is not available for planting")
+
+    db_crop_type = get_crop_type_by_code(db, crop_type_code.strip().lower())
+    if db_crop_type is None:
+        raise ValueError("Crop type not found")
+
+    remove_item_from_inventory(db, db_inventory, db_crop_type.seed_item_code, 1)
+
+    db_player_crop = models.PlayerCrop(
+        player_id=player.id,
+        crop_type_id=db_crop_type.id,
+        land_plot_id=db_plot.id,
+        state="planted",
+    )
+    db_plot.state = "planted"
+    db_plot.is_occupied = True
+    db.add(db_player_crop)
+    db.commit()
+    db.refresh(db_player_crop)
+    return db_player_crop
 
 
 def get_inventory_structured(db: Session, inventory: models.Inventory) -> dict:

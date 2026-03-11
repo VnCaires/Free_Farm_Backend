@@ -129,6 +129,8 @@ def get_my_profile(username: str = Depends(auth.get_current_username), db: Sessi
         raise HTTPException(status_code=404, detail="Player not found")
 
     db_profile, db_stats = crud.get_or_create_player_profile(db, db_player)
+    db_stats = crud.sync_player_wealth_stats(db, db_player)
+    db.commit()
     return crud.build_player_profile_response(db_player, db_profile, db_stats)
 
 
@@ -149,7 +151,18 @@ def update_my_profile(
         display_name=payload.display_name,
         avatar_url=payload.avatar_url,
     )
+    db_stats = crud.sync_player_wealth_stats(db, db_player)
+    db.commit()
     return crud.build_player_profile_response(db_player, db_profile, db_stats)
+
+
+@app.get("/progression/me", response_model=schemas.ProgressionResponse)
+def get_my_progression(username: str = Depends(auth.get_current_username), db: Session = Depends(get_db)):
+    db_player = crud.get_player_by_username(db, username)
+    if db_player is None:
+        raise HTTPException(status_code=404, detail="Player not found")
+
+    return crud.get_player_progression(db, db_player)
 
 
 @app.post("/wallet/deposit", response_model=schemas.PlayerResponse)

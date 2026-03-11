@@ -82,9 +82,30 @@ class PlayerStatsResponse(BaseModel):
     crops_harvested: int
     total_earnings: float
     total_expenses: float
+    wealth_xp: float
+    max_wealth_xp: float
+    level: int
 
     class Config:
         from_attributes = True
+
+
+class ProgressionBreakdownResponse(BaseModel):
+    balance_wealth: float
+    inventory_wealth: float
+    planted_crops_wealth: float
+    total_wealth_xp: float
+
+
+class ProgressionResponse(BaseModel):
+    player_id: int
+    username: str
+    wealth_xp: float
+    max_wealth_xp: float
+    level: int
+    next_level_xp: float | None
+    unlocked_features: list[str]
+    breakdown: ProgressionBreakdownResponse
 
 
 class PlayerProfileResponse(BaseModel):

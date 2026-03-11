@@ -15,28 +15,39 @@ INVENTORY_CAPACITY_LIMIT = 100
 DEFAULT_LAND_WIDTH = 3
 DEFAULT_LAND_HEIGHT = 3
 DEFAULT_SOIL_TYPE = "loam"
-DEFAULT_ITEM_CATALOG: list[tuple[str, str, str]] = [
-    ("seed_wheat", "Semente de Trigo", "seed"),
-    ("seed_corn", "Semente de Milho", "seed"),
-    ("seed_soy", "Semente de Soja", "seed"),
-    ("wheat", "Trigo", "crop"),
-    ("corn", "Milho", "crop"),
-    ("soy", "Soja", "crop"),
-    ("flour", "Farinha", "processed_good"),
-    ("bread", "Pao", "processed_good"),
-    ("feed", "Racao", "processed_good"),
-    ("chicken", "Galinha", "livestock"),
-    ("eggs", "Ovos", "animal_product"),
-    ("ethanol", "Etanol", "fuel"),
-    ("oil", "Oleo", "fuel"),
-    ("biodiesel", "Biodiesel", "fuel"),
-    ("workers", "Trabalhadores", "support"),
-    ("machines", "Maquinas", "support"),
-    ("manure", "Esterco", "fertility"),
-    ("fertilizer", "Fertilizante", "fertility"),
-    ("water_basic", "Agua", "resource"),
-    ("fertilizer_basic", "Fertilizante Basico", "resource"),
-    ("seed_basic", "Semente Legada", "legacy"),
+DEFAULT_ITEM_CATALOG: list[tuple[str, str, str, float]] = [
+    ("seed_wheat", "Semente de Trigo", "seed", 2.0),
+    ("seed_corn", "Semente de Milho", "seed", 2.5),
+    ("seed_soy", "Semente de Soja", "seed", 2.25),
+    ("wheat", "Trigo", "crop", 6.0),
+    ("corn", "Milho", "crop", 8.0),
+    ("soy", "Soja", "crop", 7.0),
+    ("flour", "Farinha", "processed_good", 10.0),
+    ("bread", "Pao", "processed_good", 18.0),
+    ("feed", "Racao", "processed_good", 12.0),
+    ("chicken", "Galinha", "livestock", 25.0),
+    ("eggs", "Ovos", "animal_product", 6.0),
+    ("ethanol", "Etanol", "fuel", 15.0),
+    ("oil", "Oleo", "fuel", 12.0),
+    ("biodiesel", "Biodiesel", "fuel", 20.0),
+    ("workers", "Trabalhadores", "support", 30.0),
+    ("machines", "Maquinas", "support", 60.0),
+    ("manure", "Esterco", "fertility", 4.0),
+    ("fertilizer", "Fertilizante", "fertility", 9.0),
+    ("water_basic", "Agua", "resource", 1.0),
+    ("fertilizer_basic", "Fertilizante Basico", "resource", 5.0),
+    ("seed_basic", "Semente Legada", "legacy", 2.0),
+]
+LEVEL_THRESHOLDS = [0.0, 150.0, 300.0, 600.0, 1000.0, 1600.0, 2500.0, 4000.0, 6500.0, 10000.0]
+PROGRESSION_UNLOCKS: list[tuple[int, str]] = [
+    (1, "base_farm"),
+    (2, "wheat_processing"),
+    (3, "corn_processing"),
+    (4, "soy_processing"),
+    (5, "automation_foundation"),
+    (6, "advanced_logistics"),
+    (8, "industrial_chain"),
+    (10, "market_mastery"),
 ]
 DEFAULT_CROP_TYPES: list[tuple[str, str, int, int, float, str, str]] = [
     ("wheat", "Trigo", 480, 2, 6.0, "seed_wheat", "wheat"),
@@ -62,6 +73,98 @@ def _validate_land_state(state: str) -> str:
 
 def _utcnow() -> datetime:
     return datetime.utcnow()
+
+
+def _round_wealth(value: float) -> float:
+    return round(float(value), 2)
+
+
+def get_level_from_max_wealth_xp(max_wealth_xp: float) -> int:
+    level = 1
+    for index, threshold in enumerate(LEVEL_THRESHOLDS, start=1):
+        if max_wealth_xp >= threshold:
+            level = index
+    return level
+
+
+def get_next_level_threshold(level: int) -> float | None:
+    if level >= len(LEVEL_THRESHOLDS):
+        return None
+    return LEVEL_THRESHOLDS[level]
+
+
+def get_unlocked_features(level: int) -> list[str]:
+    return [feature for required_level, feature in PROGRESSION_UNLOCKS if level >= required_level]
+
+
+def _compute_inventory_wealth(db: Session, inventory_id: int) -> float:
+    total = (
+        db.query(func.coalesce(func.sum(models.InventoryItem.quantity * models.ItemCatalog.wealth_value), 0.0))
+        .join(models.ItemCatalog, models.InventoryItem.item_id == models.ItemCatalog.id)
+        .filter(models.InventoryItem.inventory_id == inventory_id)
+        .scalar()
+    )
+    return _round_wealth(total or 0.0)
+
+
+def _compute_planted_crops_wealth(db: Session, player_id: int) -> float:
+    total = (
+        db.query(func.coalesce(func.sum(models.CropType.base_value * models.CropType.yield_quantity), 0.0))
+        .select_from(models.PlayerCrop)
+        .join(models.CropType, models.PlayerCrop.crop_type_id == models.CropType.id)
+        .filter(models.PlayerCrop.player_id == player_id)
+        .scalar()
+    )
+    return _round_wealth(total or 0.0)
+
+
+def sync_player_wealth_stats(db: Session, player: models.Player) -> models.PlayerStats:
+    db.flush()
+    db_stats = get_stats_by_player_id(db, player.id)
+    if db_stats is None:
+        db_stats = models.PlayerStats(player_id=player.id)
+        db.add(db_stats)
+        db.flush()
+
+    db_inventory = get_inventory_by_player_id(db, player.id)
+    if db_inventory is None:
+        db_inventory = models.Inventory(player_id=player.id)
+        db.add(db_inventory)
+        db.flush()
+
+    balance_wealth = _round_wealth(player.balance)
+    inventory_wealth = _compute_inventory_wealth(db, db_inventory.id)
+    planted_crops_wealth = _compute_planted_crops_wealth(db, player.id)
+    wealth_xp = _round_wealth(balance_wealth + inventory_wealth + planted_crops_wealth)
+
+    db_stats.wealth_xp = wealth_xp
+    db_stats.max_wealth_xp = _round_wealth(max(db_stats.max_wealth_xp, wealth_xp))
+    db_stats.level = get_level_from_max_wealth_xp(db_stats.max_wealth_xp)
+    db.flush()
+    return db_stats
+
+
+def build_progression_response(db: Session, player: models.Player, stats: models.PlayerStats) -> dict:
+    db_inventory = get_inventory_by_player_id(db, player.id)
+    inventory_wealth = _compute_inventory_wealth(db, db_inventory.id) if db_inventory is not None else 0.0
+    planted_crops_wealth = _compute_planted_crops_wealth(db, player.id)
+    balance_wealth = _round_wealth(player.balance)
+
+    return {
+        "player_id": player.id,
+        "username": player.username,
+        "wealth_xp": _round_wealth(stats.wealth_xp),
+        "max_wealth_xp": _round_wealth(stats.max_wealth_xp),
+        "level": stats.level,
+        "next_level_xp": get_next_level_threshold(stats.level),
+        "unlocked_features": get_unlocked_features(stats.level),
+        "breakdown": {
+            "balance_wealth": balance_wealth,
+            "inventory_wealth": inventory_wealth,
+            "planted_crops_wealth": planted_crops_wealth,
+            "total_wealth_xp": _round_wealth(balance_wealth + inventory_wealth + planted_crops_wealth),
+        },
+    }
 
 
 def _compute_crop_growth_metrics(player_crop: models.PlayerCrop) -> tuple[str, int, int]:
@@ -133,10 +236,10 @@ def get_item_catalog_by_code(db: Session, code: str) -> models.ItemCatalog | Non
 
 def ensure_default_item_catalog(db: Session) -> bool:
     changed = False
-    for code, name, category in DEFAULT_ITEM_CATALOG:
+    for code, name, category, wealth_value in DEFAULT_ITEM_CATALOG:
         db_item = get_item_catalog_by_code(db, code)
         if db_item is None:
-            db.add(models.ItemCatalog(code=code, name=name, category=category))
+            db.add(models.ItemCatalog(code=code, name=name, category=category, wealth_value=wealth_value))
             changed = True
             continue
 
@@ -145,6 +248,9 @@ def ensure_default_item_catalog(db: Session) -> bool:
             changed = True
         if db_item.category != category:
             db_item.category = category
+            changed = True
+        if db_item.wealth_value != wealth_value:
+            db_item.wealth_value = wealth_value
             changed = True
     if changed:
         db.flush()
@@ -310,11 +416,13 @@ def create_player(db: Session, username: str, email: str, password: str) -> mode
         db.add(db_inventory)
         db.add(db_profile)
         db.add(db_stats)
+        db.flush()
         bootstrap_default_land_plots(db, db_player.id)
 
         ensure_default_item_catalog(db)
         ensure_default_crop_types(db)
         bootstrap_inventory_items_from_legacy(db, db_inventory)
+        sync_player_wealth_stats(db, db_player)
 
         db.commit()
         db.refresh(db_player)
@@ -378,6 +486,9 @@ def build_player_profile_response(
             "crops_harvested": stats.crops_harvested,
             "total_earnings": stats.total_earnings,
             "total_expenses": stats.total_expenses,
+            "wealth_xp": _round_wealth(stats.wealth_xp),
+            "max_wealth_xp": _round_wealth(stats.max_wealth_xp),
+            "level": stats.level,
         },
     }
 
@@ -418,6 +529,12 @@ def create_wallet_transaction(
 def deposit_balance(db: Session, player: models.Player, amount: float) -> models.Player:
     player.balance += amount
     create_wallet_transaction(db, player.id, amount, "deposit")
+
+    db_stats = get_stats_by_player_id(db, player.id)
+    if db_stats is not None:
+        db_stats.total_earnings += amount
+
+    sync_player_wealth_stats(db, player)
     db.commit()
     db.refresh(player)
     return player
@@ -530,6 +647,9 @@ def add_item_to_inventory(
     _upsert_inventory_item_quantity(db, inventory.id, item_code, quantity)
 
     if commit:
+        db_player = db.query(models.Player).filter(models.Player.id == inventory.player_id).first()
+        if db_player is not None:
+            sync_player_wealth_stats(db, db_player)
         db.commit()
     
 
@@ -682,6 +802,7 @@ def plant_crop(
     db_plot.state = "planted"
     db_plot.is_occupied = True
     db.add(db_player_crop)
+    sync_player_wealth_stats(db, player)
     db.commit()
     db.refresh(db_player_crop)
     return db_player_crop
@@ -715,11 +836,20 @@ def harvest_crop(db: Session, player: models.Player, crop_id: int) -> tuple[dict
     if db_stats is not None:
         db_stats.crops_harvested += 1
 
+    sync_player_wealth_stats(db, player)
     db.commit()
     db.refresh(db_plot)
     db.refresh(db_inventory)
 
     return harvested_crop_response, get_inventory_structured(db, db_inventory)
+
+
+def get_player_progression(db: Session, player: models.Player) -> dict:
+    db_stats = sync_player_wealth_stats(db, player)
+    db.commit()
+    db.refresh(player)
+    db.refresh(db_stats)
+    return build_progression_response(db, player, db_stats)
 
 
 def get_inventory_structured(db: Session, inventory: models.Inventory) -> dict:

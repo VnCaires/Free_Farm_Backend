@@ -35,6 +35,20 @@ def run_startup_migrations() -> None:
             if "avatar_url" not in profile_columns:
                 connection.execute(text("ALTER TABLE player_profiles ADD COLUMN avatar_url VARCHAR NOT NULL DEFAULT ''"))
 
+        if "item_catalog" in table_names:
+            item_catalog_columns = {col["name"] for col in inspector.get_columns("item_catalog")}
+            if "wealth_value" not in item_catalog_columns:
+                connection.execute(text("ALTER TABLE item_catalog ADD COLUMN wealth_value FLOAT NOT NULL DEFAULT 0"))
+
+        if "player_stats" in table_names:
+            player_stats_columns = {col["name"] for col in inspector.get_columns("player_stats")}
+            if "wealth_xp" not in player_stats_columns:
+                connection.execute(text("ALTER TABLE player_stats ADD COLUMN wealth_xp FLOAT NOT NULL DEFAULT 0"))
+            if "max_wealth_xp" not in player_stats_columns:
+                connection.execute(text("ALTER TABLE player_stats ADD COLUMN max_wealth_xp FLOAT NOT NULL DEFAULT 0"))
+            if "level" not in player_stats_columns:
+                connection.execute(text("ALTER TABLE player_stats ADD COLUMN level INTEGER NOT NULL DEFAULT 1"))
+
         if "crop_types" in table_names:
             crop_type_columns = {col["name"] for col in inspector.get_columns("crop_types")}
             if "seed_item_code" not in crop_type_columns:

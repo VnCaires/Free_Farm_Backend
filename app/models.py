@@ -43,6 +43,7 @@ class ItemCatalog(Base):
     code: Mapped[str] = mapped_column(String, unique=True, index=True)
     name: Mapped[str] = mapped_column(String)
     category: Mapped[str] = mapped_column(String, index=True)
+    wealth_value: Mapped[float] = mapped_column(Float, default=0.0)
     inventory_items: Mapped[list["InventoryItem"]] = relationship(back_populates="item")
 
 
@@ -92,6 +93,9 @@ class PlayerStats(Base):
     crops_harvested: Mapped[int] = mapped_column(Integer, default=0)
     total_earnings: Mapped[float] = mapped_column(Float, default=0.0)
     total_expenses: Mapped[float] = mapped_column(Float, default=0.0)
+    wealth_xp: Mapped[float] = mapped_column(Float, default=0.0)
+    max_wealth_xp: Mapped[float] = mapped_column(Float, default=0.0)
+    level: Mapped[int] = mapped_column(Integer, default=1)
 
     player: Mapped[Player] = relationship(back_populates="stats")
 

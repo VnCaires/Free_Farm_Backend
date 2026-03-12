@@ -69,6 +69,13 @@ def _validate_land_state(state: str) -> str:
     return normalized
 
 
+def _validate_player_managed_land_state(state: str) -> str:
+    normalized = _validate_land_state(state)
+    if normalized == "planted":
+        raise ValueError("Planted state is managed by crop actions only")
+    return normalized
+
+
 
 
 def _utcnow() -> datetime:
@@ -883,6 +890,31 @@ def build_land_plot_response(db: Session, land_plot: models.LandPlot) -> dict:
     }
 
 
+def build_land_grid_response(db: Session, player_id: int, land_plots: list[models.LandPlot]) -> dict:
+    if not land_plots:
+        return {
+            "player_id": player_id,
+            "total_plots": 0,
+            "occupied_plots": 0,
+            "width": 0,
+            "height": 0,
+            "plots": [],
+        }
+
+    x_values = [land_plot.x for land_plot in land_plots]
+    y_values = [land_plot.y for land_plot in land_plots]
+    occupied_plots = sum(1 for land_plot in land_plots if land_plot.is_occupied)
+
+    return {
+        "player_id": player_id,
+        "total_plots": len(land_plots),
+        "occupied_plots": occupied_plots,
+        "width": (max(x_values) - min(x_values)) + 1,
+        "height": (max(y_values) - min(y_values)) + 1,
+        "plots": [build_land_plot_response(db, land_plot) for land_plot in land_plots],
+    }
+
+
 def plant_crop(
     db: Session,
     player: models.Player,
@@ -1078,7 +1110,7 @@ def create_land_plot(
     soil_type: str = DEFAULT_SOIL_TYPE,
     state: str = "empty",
 ) -> models.LandPlot:
-    validated_state = _validate_land_state(state)
+    validated_state = _validate_player_managed_land_state(state)
     normalized_soil_type = soil_type.strip().lower()
     if not normalized_soil_type:
         raise ValueError("Invalid soil type")
@@ -1093,7 +1125,7 @@ def create_land_plot(
         y=y,
         soil_type=normalized_soil_type,
         state=validated_state,
-        is_occupied=_is_plot_occupied(validated_state),
+        is_occupied=False,
     )
     db.add(db_plot)
     db.commit()
@@ -1102,13 +1134,13 @@ def create_land_plot(
 
 
 def update_land_plot_state(db: Session, land_plot: models.LandPlot, new_state: str) -> models.LandPlot:
-    validated_state = _validate_land_state(new_state)
+    validated_state = _validate_player_managed_land_state(new_state)
 
-    if validated_state == "planted" and land_plot.is_occupied:
-        raise ValueError("Plot is already occupied")
+    if land_plot.is_occupied or (land_plot.crop is not None and land_plot.crop.state != "harvested"):
+        raise ValueError("Occupied plots cannot be changed manually")
 
     land_plot.state = validated_state
-    land_plot.is_occupied = _is_plot_occupied(validated_state)
+    land_plot.is_occupied = False
     db.commit()
     db.refresh(land_plot)
     return land_plot

@@ -241,6 +241,9 @@ class LandPlotResponse(BaseModel):
 class LandGridResponse(BaseModel):
     player_id: int
     total_plots: int
+    occupied_plots: int
+    width: int
+    height: int
     plots: list[LandPlotResponse]
 
 

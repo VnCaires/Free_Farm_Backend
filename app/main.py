@@ -308,11 +308,7 @@ def get_my_land(username: str = Depends(auth.get_current_username), db: Session 
         raise HTTPException(status_code=404, detail="Player not found")
 
     land_plots = crud.get_or_create_land_plots(db, db_player.id)
-    return {
-        "player_id": db_player.id,
-        "total_plots": len(land_plots),
-        "plots": [crud.build_land_plot_response(db, land_plot) for land_plot in land_plots],
-    }
+    return crud.build_land_grid_response(db, db_player.id, land_plots)
 
 
 @app.post("/land/plots", response_model=schemas.LandPlotResponse)

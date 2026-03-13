@@ -65,6 +65,8 @@ def run_startup_migrations() -> None:
                 connection.execute(text("ALTER TABLE player_stats ADD COLUMN max_wealth_xp FLOAT NOT NULL DEFAULT 0"))
             if "level" not in player_stats_columns:
                 connection.execute(text("ALTER TABLE player_stats ADD COLUMN level INTEGER NOT NULL DEFAULT 1"))
+            if "last_land_tax_at" not in player_stats_columns:
+                connection.execute(text("ALTER TABLE player_stats ADD COLUMN last_land_tax_at DATETIME"))
 
         if "crop_types" in table_names:
             crop_type_columns = {col["name"] for col in inspector.get_columns("crop_types")}

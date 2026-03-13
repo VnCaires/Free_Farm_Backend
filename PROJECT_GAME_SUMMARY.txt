@@ -18,7 +18,7 @@ What Is Already Implemented
 - Wealth progression system based on player assets
 - Wallet deposit endpoint and wallet history endpoint
 - Unified player storage with item catalog, quantities, categories, and capacity limit
-- Land grid bootstrap with coordinate, occupancy, and expansion rules
+- Land grid bootstrap with coordinate, occupancy, square-tier expansion, and weekly tax rules
 - Crop type catalog for the current stage (`wheat`, `corn`, `soy`)
 - Planting endpoint with crop-specific seed consumption and plot occupancy validation
 - Time-based crop growth state machine (`planted`, `growing`, `ready`)
@@ -93,9 +93,9 @@ API Behavior (current)
 - /storage/me returns the player storage grouped by category
 - /inventory/me is a compatibility alias that returns the same storage view
 - /inventory/items/add currently adds directly to storage and is still a development utility endpoint
-- /land/me returns the player land grid with width, height, map limits, occupied plot count, and embedded crop snapshots
+- /land/me returns the player land grid with width, height, farm size, next expansion context, tax context, occupied plot count, and embedded crop snapshots
 - /land/plots creates extra plots while preventing duplicate coordinates and invalid manual planted state
-- /land/expand buys an adjacent plot, deducts balance, records an expense transaction, and returns the updated grid
+- /land/expand upgrades the farm to the next square tier, deducts expansion cost, records an expense transaction, and returns the updated grid
 - /land/plots/{plot_id}/state allows only safe manual soil-state changes on non-occupied plots
 - /crops/types returns available crop catalog for this game stage
 - /crops/plant validates land + crop-specific seed and persists planting
@@ -113,12 +113,20 @@ Crop Lifecycle Behavior (current)
 
 Land Grid Rules (current)
 - Plot coordinates are unique per player
-- Expansion purchases must be adjacent to owned land
-- Expansion cannot exceed configured map width/height limits
+- Farm starts at `3x3` and expands by full square tiers only: `4x4`, `5x5`, `6x6`, and so on
+- Expansion price grows exponentially by the current farm tier
+- Weekly land tax is based on the number of extra plots beyond the starter farm
+- Existing irregular farms are normalized by the next square-tier expansion instead of keeping isolated plot progression
 - Occupancy is enforced during planting
 - `planted` is reserved for crop actions and cannot be set manually through land editing endpoints
 - Occupied plots cannot be manually changed until the crop is harvested
-- `/land/me` is the main farm-rendering endpoint for the client because each occupied plot can include its current crop snapshot
+- `/land/me` is the main farm-rendering endpoint for the client because each occupied plot can include its current crop snapshot and land economy context
+
+Land Economy Rules (current)
+- Expansion cost is an economic sink separate from weekly tax
+- Weekly tax is accrued lazily from `last_land_tax_at` instead of requiring a background worker
+- Due tax is applied when the player hits land/progression-sensitive flows
+- Tax charges are recorded as wallet `expense` entries and affect balance/wealth progression
 
 Wealth Progression Rules (current)
 - `wealth_xp` represents the player's current wealth and can go down

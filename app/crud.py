@@ -1,6 +1,6 @@
 import os
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from sqlalchemy import func
 from sqlalchemy.orm import Session
@@ -14,10 +14,12 @@ ALLOWED_CROP_STATES = {"planted", "growing", "ready", "harvested"}
 STORAGE_CAPACITY_LIMIT = 300
 DEFAULT_LAND_WIDTH = 3
 DEFAULT_LAND_HEIGHT = 3
-MAX_LAND_WIDTH = 6
-MAX_LAND_HEIGHT = 6
+DEFAULT_FARM_SIZE = DEFAULT_LAND_WIDTH
+MAX_FARM_SIZE = 10
 LAND_EXPANSION_BASE_PRICE = 50.0
-LAND_EXPANSION_STEP_PRICE = 15.0
+LAND_EXPANSION_PRICE_GROWTH_FACTOR = 2.0
+LAND_WEEKLY_TAX_PER_EXTRA_PLOT = 2.0
+LAND_TAX_INTERVAL_DAYS = 7
 DEFAULT_SOIL_TYPE = "loam"
 DEFAULT_ITEM_CATALOG: list[tuple[str, str, str, float]] = [
     ("seed_wheat", "Semente de Trigo", "seed", 2.0),
@@ -133,7 +135,7 @@ def sync_player_wealth_stats(db: Session, player: models.Player) -> models.Playe
     db.flush()
     db_stats = get_stats_by_player_id(db, player.id)
     if db_stats is None:
-        db_stats = models.PlayerStats(player_id=player.id)
+        db_stats = models.PlayerStats(player_id=player.id, last_land_tax_at=_utcnow())
         db.add(db_stats)
         db.flush()
 
@@ -164,6 +166,8 @@ def build_progression_response(db: Session, player: models.Player, stats: models
     planted_crops_wealth = _compute_planted_crops_wealth(db, player.id)
     balance_wealth = _round_wealth(player.balance)
 
+    land_economy = sync_land_tax_state(db, player, apply_due_tax=False, commit=False)
+
     return {
         "player_id": player.id,
         "username": player.username,
@@ -178,6 +182,11 @@ def build_progression_response(db: Session, player: models.Player, stats: models
             "planted_crops_wealth": planted_crops_wealth,
             "total_wealth_xp": _round_wealth(balance_wealth + storage_wealth + planted_crops_wealth),
         },
+        "farm_size": land_economy["farm_size"],
+        "next_expansion_size": land_economy["next_expansion_size"],
+        "next_expansion_price": land_economy["next_expansion_price"],
+        "weekly_land_tax": land_economy["weekly_land_tax"],
+        "land_tax_due_now": land_economy["land_tax_due_now"],
     }
 
 
@@ -457,7 +466,7 @@ def create_player(db: Session, username: str, email: str, password: str) -> mode
             display_name=username,
             avatar_url="",
         )
-        db_stats = models.PlayerStats(player_id=db_player.id)
+        db_stats = models.PlayerStats(player_id=db_player.id, last_land_tax_at=_utcnow())
         db.add(db_storage)
         db.add(db_profile)
         db.add(db_stats)
@@ -501,7 +510,7 @@ def get_or_create_player_profile(db: Session, player: models.Player) -> tuple[mo
         changed = True
 
     if db_stats is None:
-        db_stats = models.PlayerStats(player_id=player.id)
+        db_stats = models.PlayerStats(player_id=player.id, last_land_tax_at=_utcnow())
         db.add(db_stats)
         changed = True
 
@@ -572,6 +581,7 @@ def create_wallet_transaction(
 
 
 def deposit_balance(db: Session, player: models.Player, amount: float) -> models.Player:
+    sync_land_tax_state(db, player, apply_due_tax=True, commit=False)
     player.balance += amount
     create_wallet_transaction(db, player.id, amount, "deposit")
 
@@ -894,31 +904,124 @@ def build_land_plot_response(db: Session, land_plot: models.LandPlot) -> dict:
     }
 
 
-def build_land_grid_response(db: Session, player_id: int, land_plots: list[models.LandPlot]) -> dict:
+def get_land_grid_dimensions(land_plots: list[models.LandPlot]) -> tuple[int, int]:
     if not land_plots:
-        return {
-            "player_id": player_id,
-            "total_plots": 0,
-            "occupied_plots": 0,
-            "width": 0,
-            "height": 0,
-            "max_width": MAX_LAND_WIDTH,
-            "max_height": MAX_LAND_HEIGHT,
-            "plots": [],
-        }
+        return 0, 0
 
     x_values = [land_plot.x for land_plot in land_plots]
     y_values = [land_plot.y for land_plot in land_plots]
-    occupied_plots = sum(1 for land_plot in land_plots if land_plot.is_occupied)
+    return (max(x_values) - min(x_values)) + 1, (max(y_values) - min(y_values)) + 1
+
+
+def get_current_farm_size(land_plots: list[models.LandPlot]) -> int:
+    width, height = get_land_grid_dimensions(land_plots)
+    return max(DEFAULT_FARM_SIZE, width, height)
+
+
+def get_next_farm_size(current_farm_size: int) -> int | None:
+    if current_farm_size >= MAX_FARM_SIZE:
+        return None
+    return current_farm_size + 1
+
+
+def get_land_expansion_price_for_size(current_farm_size: int) -> float | None:
+    if current_farm_size >= MAX_FARM_SIZE:
+        return None
+    growth_step = max(0, current_farm_size - DEFAULT_FARM_SIZE)
+    return _round_wealth(LAND_EXPANSION_BASE_PRICE * (LAND_EXPANSION_PRICE_GROWTH_FACTOR**growth_step))
+
+
+def get_weekly_land_tax_for_size(farm_size: int) -> float:
+    extra_plots = max(0, (farm_size * farm_size) - (DEFAULT_FARM_SIZE * DEFAULT_FARM_SIZE))
+    return _round_wealth(extra_plots * LAND_WEEKLY_TAX_PER_EXTRA_PLOT)
+
+
+def _get_land_tax_weeks_due(last_land_tax_at: datetime | None, now: datetime) -> int:
+    if last_land_tax_at is None:
+        return 0
+    elapsed = now - last_land_tax_at
+    return max(0, elapsed.days // LAND_TAX_INTERVAL_DAYS)
+
+
+def sync_land_tax_state(
+    db: Session,
+    player: models.Player,
+    *,
+    apply_due_tax: bool = False,
+    commit: bool = False,
+) -> dict:
+    land_plots = get_or_create_land_plots(db, player.id)
+    farm_size = get_current_farm_size(land_plots)
+    weekly_tax = get_weekly_land_tax_for_size(farm_size)
+    next_expansion_size = get_next_farm_size(farm_size)
+    next_expansion_price = get_land_expansion_price_for_size(farm_size)
+    now = _utcnow()
+
+    db_stats = get_stats_by_player_id(db, player.id)
+    if db_stats is None:
+        db_stats = models.PlayerStats(player_id=player.id, last_land_tax_at=now)
+        db.add(db_stats)
+        db.flush()
+    elif db_stats.last_land_tax_at is None:
+        db_stats.last_land_tax_at = now
+        db.flush()
+
+    land_tax_weeks_due = _get_land_tax_weeks_due(db_stats.last_land_tax_at, now)
+    tax_due_now = _round_wealth(weekly_tax * land_tax_weeks_due)
+
+    if apply_due_tax and land_tax_weeks_due > 0 and tax_due_now > 0:
+        player.balance = _round_wealth(player.balance - tax_due_now)
+        create_wallet_transaction(db, player.id, tax_due_now, "expense")
+        db_stats.total_expenses = _round_wealth(db_stats.total_expenses + tax_due_now)
+        db_stats.last_land_tax_at = db_stats.last_land_tax_at + timedelta(days=land_tax_weeks_due * LAND_TAX_INTERVAL_DAYS)
+        sync_player_wealth_stats(db, player)
+        land_tax_weeks_due = _get_land_tax_weeks_due(db_stats.last_land_tax_at, now)
+        tax_due_now = _round_wealth(weekly_tax * land_tax_weeks_due)
+        if commit:
+            db.commit()
+            db.refresh(player)
+            db.refresh(db_stats)
+    elif apply_due_tax and land_tax_weeks_due > 0:
+        db_stats.last_land_tax_at = db_stats.last_land_tax_at + timedelta(days=land_tax_weeks_due * LAND_TAX_INTERVAL_DAYS)
+        if commit:
+            db.commit()
+            db.refresh(db_stats)
+
+    next_land_tax_at = None
+    if db_stats.last_land_tax_at is not None:
+        next_land_tax_at = db_stats.last_land_tax_at + timedelta(days=LAND_TAX_INTERVAL_DAYS)
 
     return {
-        "player_id": player_id,
+        "farm_size": farm_size,
+        "max_farm_size": MAX_FARM_SIZE,
+        "next_expansion_size": next_expansion_size,
+        "next_expansion_price": next_expansion_price,
+        "weekly_land_tax": weekly_tax,
+        "land_tax_weeks_due": land_tax_weeks_due,
+        "land_tax_due_now": tax_due_now,
+        "next_land_tax_at": next_land_tax_at,
+    }
+
+
+def build_land_grid_response(db: Session, player: models.Player, land_plots: list[models.LandPlot]) -> dict:
+    width, height = get_land_grid_dimensions(land_plots)
+    occupied_plots = sum(1 for land_plot in land_plots if land_plot.is_occupied)
+    land_economy = sync_land_tax_state(db, player, apply_due_tax=False, commit=False)
+
+    return {
+        "player_id": player.id,
         "total_plots": len(land_plots),
         "occupied_plots": occupied_plots,
-        "width": (max(x_values) - min(x_values)) + 1,
-        "height": (max(y_values) - min(y_values)) + 1,
-        "max_width": MAX_LAND_WIDTH,
-        "max_height": MAX_LAND_HEIGHT,
+        "width": width,
+        "height": height,
+        "farm_size": land_economy["farm_size"],
+        "max_farm_size": land_economy["max_farm_size"],
+        "next_expansion_size": land_economy["next_expansion_size"],
+        "next_expansion_price": land_economy["next_expansion_price"],
+        "weekly_land_tax": land_economy["weekly_land_tax"],
+        "land_tax_weeks_due": land_economy["land_tax_weeks_due"],
+        "land_tax_due_now": land_economy["land_tax_due_now"],
+        "next_land_tax_at": land_economy["next_land_tax_at"],
         "plots": [build_land_plot_response(db, land_plot) for land_plot in land_plots],
     }
 
@@ -998,6 +1101,7 @@ def harvest_crop(db: Session, player: models.Player, crop_id: int) -> tuple[dict
 
 
 def get_player_progression(db: Session, player: models.Player) -> dict:
+    sync_land_tax_state(db, player, apply_due_tax=True, commit=False)
     db_stats = sync_player_wealth_stats(db, player)
     db.commit()
     db.refresh(player)
@@ -1072,42 +1176,47 @@ def list_land_plots_by_player_id(db: Session, player_id: int) -> list[models.Lan
     )
 
 
-def get_land_expansion_price(current_total_plots: int) -> float:
-    extra_plots_owned = max(0, current_total_plots - (DEFAULT_LAND_WIDTH * DEFAULT_LAND_HEIGHT))
-    return _round_wealth(LAND_EXPANSION_BASE_PRICE + (extra_plots_owned * LAND_EXPANSION_STEP_PRICE))
-
-
-def _is_adjacent_to_owned_plot(db: Session, player_id: int, x: int, y: int) -> bool:
-    adjacent_coordinates = ((x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1))
-    return any(
-        get_land_plot_by_coordinates(db, player_id, adjacent_x, adjacent_y) is not None
-        for adjacent_x, adjacent_y in adjacent_coordinates
-    )
-
-
 def expand_land_grid(
     db: Session,
     player: models.Player,
-    x: int,
-    y: int,
     soil_type: str = DEFAULT_SOIL_TYPE,
 ) -> dict:
-    if x < 0 or y < 0:
-        raise ValueError("Plot coordinates must be non-negative")
-    if x >= MAX_LAND_WIDTH or y >= MAX_LAND_HEIGHT:
-        raise ValueError("Expansion cannot exceed configured map limit")
-    if get_land_plot_by_coordinates(db, player.id, x, y) is not None:
-        raise ValueError("Plot coordinates already in use")
-    if not _is_adjacent_to_owned_plot(db, player.id, x, y):
-        raise ValueError("Expansion must be adjacent to an existing plot")
-
-    expansion_price = get_land_expansion_price(len(get_or_create_land_plots(db, player.id)))
-    if player.balance < expansion_price:
-        raise ValueError("Insufficient balance for expansion")
-
     normalized_soil_type = soil_type.strip().lower()
     if not normalized_soil_type:
         raise ValueError("Invalid soil type")
+
+    land_plots = get_or_create_land_plots(db, player.id)
+    current_farm_size = get_current_farm_size(land_plots)
+    next_farm_size = get_next_farm_size(current_farm_size)
+    if next_farm_size is None:
+        raise ValueError("Farm already reached the maximum size")
+
+    land_economy = sync_land_tax_state(db, player, apply_due_tax=True, commit=False)
+    expansion_price = land_economy["next_expansion_price"]
+    if expansion_price is None:
+        raise ValueError("Farm already reached the maximum size")
+    if player.balance < expansion_price:
+        raise ValueError("Insufficient balance for expansion")
+
+    existing_coordinates = {(plot.x, plot.y) for plot in land_plots}
+    new_plots: list[models.LandPlot] = []
+    for y in range(next_farm_size):
+        for x in range(next_farm_size):
+            if (x, y) in existing_coordinates:
+                continue
+            db_plot = models.LandPlot(
+                player_id=player.id,
+                x=x,
+                y=y,
+                soil_type=normalized_soil_type,
+                state="empty",
+                is_occupied=False,
+            )
+            db.add(db_plot)
+            new_plots.append(db_plot)
+
+    if not new_plots:
+        raise ValueError("No new plots available for the next farm tier")
 
     player.balance = _round_wealth(player.balance - expansion_price)
     create_wallet_transaction(db, player.id, expansion_price, "expense")
@@ -1116,26 +1225,23 @@ def expand_land_grid(
     if db_stats is not None:
         db_stats.total_expenses = _round_wealth(db_stats.total_expenses + expansion_price)
 
-    db_plot = models.LandPlot(
-        player_id=player.id,
-        x=x,
-        y=y,
-        soil_type=normalized_soil_type,
-        state="empty",
-        is_occupied=False,
-    )
-    db.add(db_plot)
     sync_player_wealth_stats(db, player)
     db.commit()
     db.refresh(player)
-    db.refresh(db_plot)
+    for plot in new_plots:
+        db.refresh(plot)
 
-    land_plots = list_land_plots_by_player_id(db, player.id)
+    updated_land_plots = list_land_plots_by_player_id(db, player.id)
+    updated_land_economy = sync_land_tax_state(db, player, apply_due_tax=False, commit=False)
     return {
+        "previous_farm_size": current_farm_size,
+        "new_farm_size": updated_land_economy["farm_size"],
         "price_paid": expansion_price,
+        "weekly_land_tax": updated_land_economy["weekly_land_tax"],
         "balance": player.balance,
-        "plot": build_land_plot_response(db, db_plot),
-        "grid": build_land_grid_response(db, player.id, land_plots),
+        "plots_added": len(new_plots),
+        "added_plots": [build_land_plot_response(db, plot) for plot in new_plots],
+        "grid": build_land_grid_response(db, player, updated_land_plots),
     }
 
 

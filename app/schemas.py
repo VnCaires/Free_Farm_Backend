@@ -117,6 +117,11 @@ class ProgressionResponse(BaseModel):
     next_level_xp: float | None
     unlocked_features: list[str]
     breakdown: ProgressionBreakdownResponse
+    farm_size: int
+    next_expansion_size: int | None
+    next_expansion_price: float | None
+    weekly_land_tax: float
+    land_tax_due_now: float
 
 
 class PlayerProfileResponse(BaseModel):
@@ -219,8 +224,6 @@ class LandPlotCreateRequest(BaseModel):
 
 
 class LandExpansionRequest(BaseModel):
-    x: int = Field(ge=0)
-    y: int = Field(ge=0)
     soil_type: str = "loam"
 
 
@@ -246,15 +249,25 @@ class LandGridResponse(BaseModel):
     occupied_plots: int
     width: int
     height: int
-    max_width: int
-    max_height: int
+    farm_size: int
+    max_farm_size: int
+    next_expansion_size: int | None
+    next_expansion_price: float | None
+    weekly_land_tax: float
+    land_tax_weeks_due: int
+    land_tax_due_now: float
+    next_land_tax_at: datetime | None
     plots: list[LandPlotResponse]
 
 
 class LandExpansionResponse(BaseModel):
+    previous_farm_size: int
+    new_farm_size: int
     price_paid: float
+    weekly_land_tax: float
     balance: float
-    plot: LandPlotResponse
+    plots_added: int
+    added_plots: list[LandPlotResponse]
     grid: LandGridResponse
 
 

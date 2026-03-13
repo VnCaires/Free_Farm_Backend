@@ -307,8 +307,9 @@ def get_my_land(username: str = Depends(auth.get_current_username), db: Session 
     if db_player is None:
         raise HTTPException(status_code=404, detail="Player not found")
 
+    crud.sync_land_tax_state(db, db_player, apply_due_tax=True, commit=True)
     land_plots = crud.get_or_create_land_plots(db, db_player.id)
-    return crud.build_land_grid_response(db, db_player.id, land_plots)
+    return crud.build_land_grid_response(db, db_player, land_plots)
 
 
 @app.post("/land/plots", response_model=schemas.LandPlotResponse)
@@ -345,7 +346,7 @@ def expand_my_land(
         raise HTTPException(status_code=404, detail="Player not found")
 
     try:
-        return crud.expand_land_grid(db, db_player, payload.x, payload.y, payload.soil_type)
+        return crud.expand_land_grid(db, db_player, payload.soil_type)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 

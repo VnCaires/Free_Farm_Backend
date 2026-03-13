@@ -121,6 +121,7 @@ class PlayerStats(Base):
     wealth_xp: Mapped[float] = mapped_column(Float, default=0.0)
     max_wealth_xp: Mapped[float] = mapped_column(Float, default=0.0)
     level: Mapped[int] = mapped_column(Integer, default=1)
+    last_land_tax_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     player: Mapped[Player] = relationship(back_populates="stats")
 

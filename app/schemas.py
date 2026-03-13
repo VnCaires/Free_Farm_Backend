@@ -227,6 +227,10 @@ class LandExpansionRequest(BaseModel):
     soil_type: str = "loam"
 
 
+class LandPlotStateUpdateRequest(BaseModel):
+    state: str
+
+
 class LandPlotResponse(BaseModel):
     id: int
     player_id: int

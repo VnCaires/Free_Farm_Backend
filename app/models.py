@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .database import Base
@@ -20,6 +20,7 @@ class Player(Base):
     profile: Mapped["PlayerProfile"] = relationship(back_populates="player", uselist=False)
     stats: Mapped["PlayerStats"] = relationship(back_populates="player", uselist=False)
     wallet_transactions: Mapped[list["WalletTransaction"]] = relationship(back_populates="player")
+    idempotency_operations: Mapped[list["IdempotencyOperation"]] = relationship(back_populates="player")
     refresh_sessions: Mapped[list["RefreshSession"]] = relationship(back_populates="player")
     land_plots: Mapped[list["LandPlot"]] = relationship(back_populates="player", cascade="all, delete-orphan")
     crops: Mapped[list["PlayerCrop"]] = relationship(back_populates="player", cascade="all, delete-orphan")
@@ -83,6 +84,25 @@ class StorageItem(Base):
 
     storage: Mapped[Storage] = relationship(back_populates="items")
     item: Mapped[ItemCatalog] = relationship()
+
+
+class IdempotencyOperation(Base):
+    __tablename__ = "idempotency_operations"
+    __table_args__ = (
+        UniqueConstraint("player_id", "operation_type", "idempotency_key", name="uq_player_operation_idempotency"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, index=True)
+    player_id: Mapped[int] = mapped_column(ForeignKey("players.id"), index=True)
+    operation_type: Mapped[str] = mapped_column(String, index=True)
+    idempotency_key: Mapped[str] = mapped_column(String, index=True)
+    request_hash: Mapped[str] = mapped_column(String, index=True)
+    status: Mapped[str] = mapped_column(String, default="processing", index=True)
+    response_payload: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    player: Mapped[Player] = relationship(back_populates="idempotency_operations")
 
 
 class WalletTransaction(Base):

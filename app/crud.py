@@ -1,8 +1,12 @@
+import hashlib
+import json
 import os
 from collections import defaultdict
 from datetime import datetime, timedelta
+from typing import Any, Callable
 
 from sqlalchemy import func
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from . import auth, models
@@ -73,6 +77,8 @@ DEFAULT_CROP_TYPES: list[tuple[str, str, int, int, float, str, str]] = [
 ]
 SUPPORTED_CROP_TYPE_CODES = {crop_type[0] for crop_type in DEFAULT_CROP_TYPES}
 EMAIL_VERIFICATION_ENABLED = os.getenv("EMAIL_VERIFICATION_ENABLED", "false").lower() == "true"
+IDEMPOTENCY_STATUS_PROCESSING = "processing"
+IDEMPOTENCY_STATUS_COMPLETED = "completed"
 
 
 def _is_plot_occupied(state: str) -> bool:
@@ -101,6 +107,142 @@ def _utcnow() -> datetime:
 
 def _round_wealth(value: float) -> float:
     return round(float(value), 2)
+
+
+def _json_default(value: Any) -> str:
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return str(value)
+
+
+def _serialize_payload(payload: Any) -> str:
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"), default=_json_default)
+
+
+def _deserialize_payload(payload: str) -> Any:
+    return json.loads(payload)
+
+
+def _hash_payload(payload: Any) -> str:
+    return hashlib.sha256(_serialize_payload(payload).encode("utf-8")).hexdigest()
+
+
+def require_idempotency_key(idempotency_key: str | None) -> str:
+    if idempotency_key is None or not idempotency_key.strip():
+        _fail("Idempotency-Key header is required", status_code=400)
+    return idempotency_key.strip()
+
+
+def get_idempotency_operation(
+    db: Session,
+    player_id: int,
+    operation_type: str,
+    idempotency_key: str,
+) -> models.IdempotencyOperation | None:
+    return (
+        db.query(models.IdempotencyOperation)
+        .filter(
+            models.IdempotencyOperation.player_id == player_id,
+            models.IdempotencyOperation.operation_type == operation_type,
+            models.IdempotencyOperation.idempotency_key == idempotency_key,
+        )
+        .first()
+    )
+
+
+def _resolve_existing_idempotency_operation(
+    existing_operation: models.IdempotencyOperation,
+    request_hash: str,
+) -> Any:
+    if existing_operation.request_hash != request_hash:
+        _fail("Idempotency key already used with a different payload", status_code=409)
+    if existing_operation.status == IDEMPOTENCY_STATUS_COMPLETED and existing_operation.response_payload is not None:
+        return _deserialize_payload(existing_operation.response_payload)
+    _fail("Operation already in progress for this Idempotency-Key", status_code=409)
+
+
+def begin_idempotent_operation(
+    db: Session,
+    player_id: int,
+    operation_type: str,
+    idempotency_key: str | None,
+    request_payload: Any,
+) -> tuple[models.IdempotencyOperation | None, Any | None]:
+    normalized_key = require_idempotency_key(idempotency_key)
+    request_hash = _hash_payload(request_payload)
+
+    existing_operation = get_idempotency_operation(db, player_id, operation_type, normalized_key)
+    if existing_operation is not None:
+        return None, _resolve_existing_idempotency_operation(existing_operation, request_hash)
+
+    db_operation = models.IdempotencyOperation(
+        player_id=player_id,
+        operation_type=operation_type,
+        idempotency_key=normalized_key,
+        request_hash=request_hash,
+        status=IDEMPOTENCY_STATUS_PROCESSING,
+    )
+    db.add(db_operation)
+
+    try:
+        db.commit()
+        db.refresh(db_operation)
+        return db_operation, None
+    except IntegrityError:
+        db.rollback()
+        existing_operation = get_idempotency_operation(db, player_id, operation_type, normalized_key)
+        if existing_operation is None:
+            raise
+        return None, _resolve_existing_idempotency_operation(existing_operation, request_hash)
+
+
+def complete_idempotent_operation(
+    db: Session,
+    db_operation: models.IdempotencyOperation,
+    response_payload: Any,
+) -> Any:
+    db_operation.status = IDEMPOTENCY_STATUS_COMPLETED
+    db_operation.response_payload = _serialize_payload(response_payload)
+    db_operation.completed_at = _utcnow()
+    db.commit()
+    db.refresh(db_operation)
+    return response_payload
+
+
+def cancel_idempotent_operation(db: Session, db_operation: models.IdempotencyOperation) -> None:
+    db.rollback()
+    persisted_operation = db.get(models.IdempotencyOperation, db_operation.id)
+    if persisted_operation is not None:
+        db.delete(persisted_operation)
+        db.commit()
+
+
+def execute_idempotent_operation(
+    db: Session,
+    player_id: int,
+    operation_type: str,
+    idempotency_key: str | None,
+    request_payload: Any,
+    operation: Callable[[], Any],
+) -> Any:
+    db_operation, cached_response = begin_idempotent_operation(
+        db,
+        player_id=player_id,
+        operation_type=operation_type,
+        idempotency_key=idempotency_key,
+        request_payload=request_payload,
+    )
+    if cached_response is not None:
+        return cached_response
+    if db_operation is None:
+        _fail("Unable to initialize idempotent operation", status_code=500)
+
+    try:
+        response_payload = operation()
+        return complete_idempotent_operation(db, db_operation, response_payload)
+    except Exception:
+        cancel_idempotent_operation(db, db_operation)
+        raise
 
 
 def get_level_from_max_wealth_xp(max_wealth_xp: float) -> int:
@@ -611,6 +753,16 @@ def get_or_create_player_profile(db: Session, player: models.Player) -> tuple[mo
     return db_profile, db_stats
 
 
+def build_player_response(player: models.Player) -> dict:
+    return {
+        "id": player.id,
+        "username": player.username,
+        "email": player.email,
+        "email_verified": player.email_verified,
+        "balance": _round_wealth(player.balance),
+    }
+
+
 def build_player_profile_response(
     player: models.Player,
     profile: models.PlayerProfile,
@@ -669,19 +821,23 @@ def create_wallet_transaction(
     return db_transaction
 
 
-def deposit_balance(db: Session, player: models.Player, amount: float) -> models.Player:
+def deposit_balance(db: Session, player: models.Player, amount: float, *, commit: bool = True) -> dict:
     sync_land_tax_state(db, player, apply_due_tax=True, commit=False)
-    player.balance += amount
+    player.balance = _round_wealth(player.balance + amount)
     create_wallet_transaction(db, player.id, amount, "deposit")
 
     db_stats = get_stats_by_player_id(db, player.id)
     if db_stats is not None:
-        db_stats.total_earnings += amount
+        db_stats.total_earnings = _round_wealth(db_stats.total_earnings + amount)
 
     sync_player_wealth_stats(db, player)
-    db.commit()
-    db.refresh(player)
-    return player
+    db.flush()
+
+    if commit:
+        db.commit()
+        db.refresh(player)
+
+    return build_player_response(player)
 
 
 def get_wallet_history_by_player_id(
@@ -1117,6 +1273,8 @@ def plant_crop(
     player: models.Player,
     crop_type_code: str,
     plot_id: int,
+    *,
+    commit: bool = True,
 ) -> models.PlayerCrop:
     db_storage = get_or_create_storage(db, player.id)
     db_plot = require_land_plot_available_for_planting(get_land_plot_by_id_for_player(db, player.id, plot_id))
@@ -1138,12 +1296,22 @@ def plant_crop(
     db_plot.is_occupied = True
     db.add(db_player_crop)
     sync_player_wealth_stats(db, player)
-    db.commit()
-    db.refresh(db_player_crop)
+    db.flush()
+
+    if commit:
+        db.commit()
+        db.refresh(db_player_crop)
+
     return db_player_crop
 
 
-def harvest_crop(db: Session, player: models.Player, crop_id: int) -> tuple[dict, dict]:
+def harvest_crop(
+    db: Session,
+    player: models.Player,
+    crop_id: int,
+    *,
+    commit: bool = True,
+) -> tuple[dict, dict]:
     db_player_crop = require_player_crop(get_player_crop_by_id_for_player(db, player.id, crop_id))
     require_crop_ready_for_harvest(db_player_crop)
 
@@ -1168,9 +1336,12 @@ def harvest_crop(db: Session, player: models.Player, crop_id: int) -> tuple[dict
         db_stats.crops_harvested += 1
 
     sync_player_wealth_stats(db, player)
-    db.commit()
-    db.refresh(db_plot)
-    db.refresh(db_storage)
+    db.flush()
+
+    if commit:
+        db.commit()
+        db.refresh(db_plot)
+        db.refresh(db_storage)
 
     return harvested_crop_response, get_storage_structured(db, db_storage)
 
@@ -1255,6 +1426,8 @@ def expand_land_grid(
     db: Session,
     player: models.Player,
     soil_type: str = DEFAULT_SOIL_TYPE,
+    *,
+    commit: bool = True,
 ) -> dict:
     normalized_soil_type = require_valid_soil_type(soil_type)
 
@@ -1296,10 +1469,13 @@ def expand_land_grid(
         db_stats.total_expenses = _round_wealth(db_stats.total_expenses + expansion_price)
 
     sync_player_wealth_stats(db, player)
-    db.commit()
-    db.refresh(player)
-    for plot in new_plots:
-        db.refresh(plot)
+    db.flush()
+
+    if commit:
+        db.commit()
+        db.refresh(player)
+        for plot in new_plots:
+            db.refresh(plot)
 
     updated_land_plots = list_land_plots_by_player_id(db, player.id)
     updated_land_economy = sync_land_tax_state(db, player, apply_due_tax=False, commit=False)

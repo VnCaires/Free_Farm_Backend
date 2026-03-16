@@ -1,6 +1,6 @@
 from collections.abc import Generator
 
-from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from . import auth, crud, database, models, schemas
@@ -174,13 +174,24 @@ def wallet_deposit(
     deposit: schemas.WalletDepositRequest,
     username: str = Depends(auth.get_current_username),
     db: Session = Depends(get_db),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ):
     db_player = crud.get_player_by_username(db, username)
 
     if db_player is None:
         raise HTTPException(status_code=404, detail="Player not found")
 
-    return crud.deposit_balance(db, db_player, deposit.amount)
+    try:
+        return crud.execute_idempotent_operation(
+            db,
+            player_id=db_player.id,
+            operation_type="wallet_deposit",
+            idempotency_key=idempotency_key,
+            request_payload={"amount": deposit.amount},
+            operation=lambda: crud.deposit_balance(db, db_player, deposit.amount, commit=False),
+        )
+    except crud.GameplayValidationError as exc:
+        raise raise_http_from_validation_error(exc) from exc
 
 
 @app.get("/wallet/history", response_model=list[schemas.WalletTransactionResponse])
@@ -213,6 +224,7 @@ def add_inventory_item(
     payload: schemas.InventoryAddItemRequest,
     username: str = Depends(auth.get_current_username),
     db: Session = Depends(get_db),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ):
     db_player = crud.get_player_by_username(db, username)
     if db_player is None:
@@ -221,11 +233,16 @@ def add_inventory_item(
     db_storage = crud.get_or_create_storage(db, db_player.id)
 
     try:
-        crud.add_item_to_storage(db, db_storage, payload.item_code, payload.quantity)
+        return crud.execute_idempotent_operation(
+            db,
+            player_id=db_player.id,
+            operation_type="storage_add_item",
+            idempotency_key=idempotency_key,
+            request_payload={"item_code": payload.item_code, "quantity": payload.quantity},
+            operation=lambda: (crud.add_item_to_storage(db, db_storage, payload.item_code, payload.quantity, commit=False), crud.get_storage_structured(db, db_storage))[1],
+        )
     except crud.GameplayValidationError as exc:
         raise raise_http_from_validation_error(exc) from exc
-
-    return crud.get_storage_structured(db, db_storage)
 
 
 @app.get("/storage/me", response_model=schemas.StorageResponse)
@@ -248,17 +265,25 @@ def plant_crop(
     payload: schemas.PlantCropRequest,
     username: str = Depends(auth.get_current_username),
     db: Session = Depends(get_db),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ):
     db_player = crud.get_player_by_username(db, username)
     if db_player is None:
         raise HTTPException(status_code=404, detail="Player not found")
 
     try:
-        db_player_crop = crud.plant_crop(db, db_player, payload.crop_type_code, payload.plot_id)
+        return crud.execute_idempotent_operation(
+            db,
+            player_id=db_player.id,
+            operation_type="crop_plant",
+            idempotency_key=idempotency_key,
+            request_payload={"crop_type_code": payload.crop_type_code, "plot_id": payload.plot_id},
+            operation=lambda: crud.build_player_crop_response(
+                crud.plant_crop(db, db_player, payload.crop_type_code, payload.plot_id, commit=False)
+            ),
+        )
     except crud.GameplayValidationError as exc:
         raise raise_http_from_validation_error(exc) from exc
-
-    return crud.build_player_crop_response(db_player_crop)
 
 
 @app.get("/crops/me", response_model=list[schemas.PlayerCropResponse])
@@ -292,17 +317,25 @@ def harvest_my_crop(
     crop_id: int,
     username: str = Depends(auth.get_current_username),
     db: Session = Depends(get_db),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ):
     db_player = crud.get_player_by_username(db, username)
     if db_player is None:
         raise HTTPException(status_code=404, detail="Player not found")
 
     try:
-        harvested_crop, storage = crud.harvest_crop(db, db_player, crop_id)
+        return crud.execute_idempotent_operation(
+            db,
+            player_id=db_player.id,
+            operation_type="crop_harvest",
+            idempotency_key=idempotency_key,
+            request_payload={"crop_id": crop_id},
+            operation=lambda: (
+                lambda harvested_crop, storage: {"crop": harvested_crop, "storage": storage}
+            )(*crud.harvest_crop(db, db_player, crop_id, commit=False)),
+        )
     except crud.GameplayValidationError as exc:
         raise raise_http_from_validation_error(exc) from exc
-
-    return {"crop": harvested_crop, "storage": storage}
 
 
 @app.get("/land/me", response_model=schemas.LandGridResponse)
@@ -344,13 +377,21 @@ def expand_my_land(
     payload: schemas.LandExpansionRequest,
     username: str = Depends(auth.get_current_username),
     db: Session = Depends(get_db),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ):
     db_player = crud.get_player_by_username(db, username)
     if db_player is None:
         raise HTTPException(status_code=404, detail="Player not found")
 
     try:
-        return crud.expand_land_grid(db, db_player, payload.soil_type)
+        return crud.execute_idempotent_operation(
+            db,
+            player_id=db_player.id,
+            operation_type="land_expand",
+            idempotency_key=idempotency_key,
+            request_payload={"soil_type": payload.soil_type},
+            operation=lambda: crud.expand_land_grid(db, db_player, payload.soil_type, commit=False),
+        )
     except crud.GameplayValidationError as exc:
         raise raise_http_from_validation_error(exc) from exc
 
